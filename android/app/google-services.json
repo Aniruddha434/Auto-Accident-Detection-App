@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "690145326226",
+    "project_id": "accident-report-c0729",
+    "storage_bucket": "accident-report-c0729.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:690145326226:android:0b29375f69f6a3198f624b",
+        "android_client_info": {
+          "package_name": "com.example.accident_report_system"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "690145326226-tk43vc82g5m8v97lid4eb9i9hrcc2sh0.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.accident_report_system",
+            "certificate_hash": "e9dd2b71c0156c7fe49cfc50f53ea430369fba8a"
+          }
+        },
+        {
+          "client_id": "690145326226-nlqv6lhmv9h54q4ft4sno7nl60kfa46i.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDCIISDb0qZyxDGYWFrUDxoBP8f6-_8QWY"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "690145326226-nlqv6lhmv9h54q4ft4sno7nl60kfa46i.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
