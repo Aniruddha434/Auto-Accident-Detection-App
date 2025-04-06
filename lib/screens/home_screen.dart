@@ -4,7 +4,10 @@ import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:flutter/foundation.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:latlong2/latlong.dart';
+import 'dart:math';
+import 'package:flutter_map/flutter_map.dart';
 
 import 'package:accident_report_system/models/user_model.dart';
 import 'package:accident_report_system/providers/auth_provider.dart';
@@ -12,11 +15,18 @@ import 'package:accident_report_system/providers/accident_provider.dart';
 import 'package:accident_report_system/services/voice_command_service.dart';
 import 'package:accident_report_system/screens/accident_history_screen.dart';
 import 'package:accident_report_system/screens/emergency_contacts_screen.dart';
+import 'package:accident_report_system/screens/nearby_hospitals_screen.dart';
 import 'package:accident_report_system/widgets/emergency_dashboard.dart';
 import 'package:accident_report_system/models/guidance_message.dart';
 import 'package:accident_report_system/services/background_service.dart';
 import 'package:accident_report_system/models/accident_context.dart';
 import 'package:accident_report_system/services/emergency_service.dart';
+import 'package:accident_report_system/services/accident_zone_service.dart';
+import 'package:accident_report_system/models/accident_zone.dart';
+import 'package:accident_report_system/widgets/accident_zone_layer.dart';
+import 'package:accident_report_system/widgets/marker_layer.dart';
+import 'package:accident_report_system/widgets/marker.dart';
+import 'package:accident_report_system/services/kaggle_data_service.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -25,17 +35,29 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateMixin {
+class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   bool _monitoringEnabled = false;
   bool _isBackgroundServiceRunning = false;
   bool _voiceCommandsEnabled = true;
   late TabController _tabController;
+  List<AccidentZone> _nearbyAccidentZones = [];
+  bool _isLoadingZones = false;
+  final AccidentZoneService _zoneService = AccidentZoneService();
+  int _selectedIndex = 0;
+  bool _isLoading = false;
+  bool _isLoadingKaggleData = false;
+  final KaggleDataService _kaggleService = KaggleDataService();
 
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 3, vsync: this);
-    _initializeServices();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _checkLocationAndLoadZones();
+    });
+    WidgetsBinding.instance.addObserver(this);
+    _checkPermissionsAndStartServices();
+    _loadIndianAccidentData(); // Automatically load Kaggle data on startup
   }
 
   Future<void> _initializeServices() async {
@@ -216,14 +238,32 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     }
   }
 
+  void _checkPermissionsAndStartServices() async {
+    try {
+      final accidentProvider = Provider.of<AccidentProvider>(context, listen: false);
+      
+      // Request permissions and start monitoring without requiring user login
+      await accidentProvider.startMonitoring();
+      setState(() {
+        _monitoringEnabled = accidentProvider.isMonitoring;
+      });
+    } catch (e) {
+      debugPrint('Error starting monitoring: $e');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    debugPrint('HomeScreen build method called');
     
     return Scaffold(
+      drawer: _buildSettingsDrawer(context),
       appBar: AppBar(
         title: const Text('SafeDrive', style: TextStyle(fontWeight: FontWeight.w600)),
         elevation: 0,
+        backgroundColor: theme.colorScheme.primary,
+        foregroundColor: Colors.white,
         actions: [
           IconButton(
             icon: Icon(_isBackgroundServiceRunning 
@@ -241,9 +281,9 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
               : 'Start background monitoring',
           ),
           IconButton(
-            icon: const Icon(Icons.exit_to_app),
-            onPressed: () => _handleSignOut(context),
-            tooltip: 'Sign Out',
+            icon: const Icon(Icons.settings),
+            onPressed: () => _showSettingsDialog(),
+            tooltip: 'Settings',
           ),
         ],
       ),
@@ -263,7 +303,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
             children: [
               // Header background gradient
               Container(
-                height: 150,
+                height: 200,
                 width: double.infinity,
                 decoration: BoxDecoration(
                   gradient: LinearGradient(
@@ -271,37 +311,47 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                     end: Alignment.bottomCenter,
                     colors: [
                       theme.colorScheme.primary,
-                      theme.colorScheme.primary.withOpacity(0.8),
+                      theme.colorScheme.primary.withOpacity(0),
                     ],
+                    stops: const [0.0, 0.9],
                   ),
                 ),
               ),
+              // Content
               SafeArea(
                 child: SingleChildScrollView(
                   physics: const BouncingScrollPhysics(),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                        _buildUserProfileCard(user, theme),
-                            const SizedBox(height: 20),
-                            _buildStatusCard(accidentProvider, user, theme),
-                            const SizedBox(height: 20),
-                            _buildVoiceCommandsCard(),
-                            const SizedBox(height: 20),
-                        _buildQuickActionsSection(theme),
-                            const SizedBox(height: 20),
-                        _buildManualAlertButton(theme, user.uid),
-                            const SizedBox(height: 20),
-                        const EmergencyDashboard(),
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                      minHeight: MediaQuery.of(context).size.height - 100,
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              _buildUserProfileCard(user, theme),
+                              const SizedBox(height: 20),
+                              _buildStatusCard(accidentProvider, user, theme),
+                              const SizedBox(height: 20),
+                              _buildVoiceCommandsCard(),
+                              const SizedBox(height: 20),
+                              _buildQuickActionsSection(theme),
+                              const SizedBox(height: 20),
+                              _buildManualAlertButton(theme, user.uid),
+                              const SizedBox(height: 20),
+                              _buildAccidentZoneCard(),
+                              const SizedBox(height: 20),
+                              const EmergencyDashboard(),
+                              const SizedBox(height: 100), // Extra space for FAB and bottom nav
+                            ],
+                          ),
+                        ),
                       ],
                     ),
-                      ),
-                    ],
                   ),
                 ),
               ),
@@ -332,27 +382,34 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
             },
           );
         },
-        icon: const Icon(Icons.medical_services_outlined),
-        label: const Text('Emergency Guidance'),
-        backgroundColor: theme.colorScheme.secondary,
+        icon: const Icon(Icons.medical_services_outlined, size: 18),
+        label: const Text('Emergency Guidance', style: TextStyle(fontSize: 12)),
+        backgroundColor: theme.colorScheme.error,
+        foregroundColor: Colors.white,
+        elevation: 4,
       ),
       bottomNavigationBar: BottomNavigationBar(
         currentIndex: 0,
+        type: BottomNavigationBarType.fixed,
+        selectedFontSize: 11, // Reduced font size
+        unselectedFontSize: 11, // Reduced font size
+        selectedItemColor: theme.colorScheme.primary,
+        unselectedItemColor: Colors.grey,
         items: const [
           BottomNavigationBarItem(
-            icon: Icon(Icons.home),
+            icon: Icon(Icons.home, size: 20), // Reduced icon size
             label: 'Home',
           ),
           BottomNavigationBarItem(
-            icon: Icon(Icons.history),
+            icon: Icon(Icons.history, size: 20), // Reduced icon size
             label: 'History',
           ),
           BottomNavigationBarItem(
-            icon: Icon(Icons.contact_phone),
+            icon: Icon(Icons.contact_phone, size: 20), // Reduced icon size
             label: 'Contacts',
           ),
           BottomNavigationBarItem(
-            icon: Icon(Icons.person),
+            icon: Icon(Icons.person, size: 20), // Reduced icon size
             label: 'Profile',
           ),
         ],
@@ -373,7 +430,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
               );
               break;
             case 3: // Profile
-              // TODO: Navigate to profile screen
+              Navigator.pushNamed(context, '/profile');
               break;
           }
         },
@@ -382,9 +439,12 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   }
 
   Widget _buildUserProfileCard(UserModel user, ThemeData theme) {
+    final isDarkMode = theme.brightness == Brightness.dark;
+    
     return Card(
       margin: EdgeInsets.zero,
-      elevation: 0,
+      elevation: 4,
+      shadowColor: Colors.black.withOpacity(0.1),
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(20),
       ),
@@ -392,18 +452,34 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         padding: const EdgeInsets.all(16.0),
         child: Row(
           children: [
-            CircleAvatar(
-              radius: 30,
-              backgroundColor: theme.colorScheme.primary.withOpacity(0.1),
-                child: Text(
-                user.name.isNotEmpty ? user.name[0].toUpperCase() : '?',
-                style: TextStyle(
-                  fontSize: 24,
-                    fontWeight: FontWeight.bold,
-                  color: theme.colorScheme.primary,
+            Container(
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                boxShadow: [
+                  BoxShadow(
+                    color: theme.colorScheme.primary.withOpacity(0.2),
+                    blurRadius: 10,
+                    spreadRadius: 2,
+                  ),
+                ],
+              ),
+              child: CircleAvatar(
+                radius: 34,
+                backgroundColor: theme.colorScheme.primary,
+                child: CircleAvatar(
+                  radius: 32,
+                  backgroundColor: isDarkMode ? theme.cardColor : Colors.white,
+                  child: Text(
+                    user.name.isNotEmpty ? user.name[0].toUpperCase() : '?',
+                    style: TextStyle(
+                      fontSize: 26,
+                      fontWeight: FontWeight.bold,
+                      color: theme.colorScheme.primary,
+                    ),
                   ),
                 ),
               ),
+            ),
             const SizedBox(width: 16),
             Expanded(
               child: Column(
@@ -413,48 +489,65 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                     'Welcome back,',
                     style: TextStyle(
                       fontSize: 14,
-                      color: Colors.grey.shade600,
+                      color: isDarkMode ? Colors.grey.shade300 : Colors.grey.shade600,
                     ),
                   ),
                   Text(
                     user.name,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: 20,
                       fontWeight: FontWeight.bold,
+                      color: isDarkMode ? Colors.white : Colors.black87,
                     ),
                   ),
                   const SizedBox(height: 4),
                   Text(
                     user.email ?? user.phoneNumber ?? 'No contact info',
                     style: TextStyle(
-                      fontSize: 14,
-                      color: Colors.grey.shade600,
+                      fontSize: 13,
+                      color: isDarkMode ? Colors.grey.shade400 : Colors.grey.shade600,
                     ),
                   ),
                 ],
               ),
             ),
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: theme.colorScheme.primary.withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(20),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [
+                    theme.colorScheme.primary,
+                    theme.colorScheme.primary.withBlue(
+                      (theme.colorScheme.primary.blue + 20).clamp(0, 255)
                     ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
+                  ],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+                borderRadius: BorderRadius.circular(20),
+                boxShadow: [
+                  BoxShadow(
+                    color: theme.colorScheme.primary.withOpacity(0.3),
+                    blurRadius: 4,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
                     Icons.verified_user,
-                          size: 16,
-                          color: theme.colorScheme.primary,
-                        ),
-                        const SizedBox(width: 4),
-                        Text(
-                    'Premium',
-                          style: TextStyle(
+                    size: 16,
+                    color: Colors.white,
+                  ),
+                  const SizedBox(width: 4),
+                  Text(
+                    'User',
+                    style: TextStyle(
                       fontSize: 12,
                       fontWeight: FontWeight.bold,
-                            color: theme.colorScheme.primary,
+                      color: Colors.white,
                     ),
                   ),
                 ],
@@ -468,9 +561,12 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
 
   Widget _buildStatusCard(AccidentProvider accidentProvider, UserModel user, ThemeData theme) {
     final isMonitoring = accidentProvider.isMonitoring;
+    final isDarkMode = theme.brightness == Brightness.dark;
+    
     return Card(
       margin: EdgeInsets.zero,
-      elevation: 0,
+      elevation: 4,
+      shadowColor: Colors.black.withOpacity(0.1),
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(20),
       ),
@@ -478,19 +574,21 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         padding: const EdgeInsets.all(16.0),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
               children: [
-                Row(
-                  children: [
-                    Icon(
+                Icon(
                   Icons.shield,
                   color: theme.colorScheme.primary,
+                  size: 22,
                 ),
                 const SizedBox(width: 8),
-                const Text(
+                Text(
                   'Accident Protection',
                   style: TextStyle(
-                    fontSize: 16,
+                    fontSize: 18,
                     fontWeight: FontWeight.bold,
+                    color: isDarkMode ? Colors.white : Colors.black87,
                   ),
                 ),
                 const Spacer(),
@@ -509,57 +607,145 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
             ),
             const SizedBox(height: 16),
             Container(
-              padding: const EdgeInsets.all(12),
+              padding: const EdgeInsets.all(16),
               decoration: BoxDecoration(
-                      color: isMonitoring 
-                    ? theme.colorScheme.primary.withOpacity(0.1)
-                    : Colors.grey.shade100,
-                borderRadius: BorderRadius.circular(12),
+                gradient: LinearGradient(
+                  colors: isMonitoring
+                    ? isDarkMode
+                      ? [
+                          theme.colorScheme.primary.withOpacity(0.25),
+                          theme.colorScheme.primary.withOpacity(0.15),
+                        ]
+                      : [
+                          theme.colorScheme.primary.withOpacity(0.12),
+                          theme.colorScheme.primary.withOpacity(0.04),
+                        ]
+                    : isDarkMode
+                      ? [
+                          Colors.grey.shade800,
+                          Colors.grey.shade900,
+                        ]
+                      : [
+                          Colors.grey.shade100,
+                          Colors.grey.shade50,
+                        ],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(
+                  color: isMonitoring 
+                    ? theme.colorScheme.primary.withOpacity(0.3)
+                    : isDarkMode ? Colors.grey.shade700 : Colors.grey.shade300,
+                  width: 1,
+                ),
               ),
               child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  CircleAvatar(
-                    radius: 20,
-                    backgroundColor: isMonitoring
-                        ? theme.colorScheme.primary
-                        : Colors.grey.shade400,
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: isMonitoring
+                          ? theme.colorScheme.primary
+                          : isDarkMode ? Colors.grey.shade700 : Colors.grey.shade400,
+                      shape: BoxShape.circle,
+                      boxShadow: [
+                        BoxShadow(
+                          color: isMonitoring
+                            ? theme.colorScheme.primary.withOpacity(0.3)
+                            : Colors.grey.withOpacity(0.2),
+                          blurRadius: 8,
+                          spreadRadius: 0,
+                          offset: const Offset(0, 3),
+                        ),
+                      ],
+                    ),
                     child: Icon(
                       isMonitoring ? Icons.sensors : Icons.sensors_off,
                       color: Colors.white,
-                      size: 20,
+                      size: 24,
                     ),
                   ),
-                  const SizedBox(width: 12),
+                  const SizedBox(width: 16),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                Text(
+                        Text(
                           isMonitoring
                               ? 'Accident Detection Active'
                               : 'Accident Detection Inactive',
                           style: TextStyle(
-                    fontWeight: FontWeight.bold,
-                        color: isMonitoring
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16,
+                            color: isMonitoring
                                 ? theme.colorScheme.primary
-                                : Colors.grey.shade700,
+                                : isDarkMode ? Colors.grey.shade300 : Colors.grey.shade700,
                           ),
                         ),
-                        const SizedBox(height: 4),
+                        const SizedBox(height: 6),
                         Text(
                           isMonitoring
                               ? 'Your safety is our priority. We\'re actively monitoring for potential accidents.'
                               : 'Turn on monitoring to enable automatic accident detection.',
                           style: TextStyle(
-                            fontSize: 12,
-                            color: Colors.grey.shade600,
-                      ),
+                            fontSize: 13,
+                            height: 1.4,
+                            color: isDarkMode ? Colors.grey.shade400 : Colors.grey.shade600,
+                          ),
+                        ),
+                        if (isMonitoring)
+                          Container(
+                            margin: const EdgeInsets.only(top: 12),
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: isDarkMode ? Colors.grey.shade800 : Colors.white,
+                              borderRadius: BorderRadius.circular(12),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withOpacity(0.05),
+                                  blurRadius: 4,
+                                  spreadRadius: 0,
+                                  offset: const Offset(0, 2),
+                                ),
+                              ],
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Container(
+                                  width: 8,
+                                  height: 8,
+                                  decoration: BoxDecoration(
+                                    color: Colors.green,
+                                    shape: BoxShape.circle,
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color: Colors.green.withOpacity(0.5),
+                                        blurRadius: 4,
+                                        spreadRadius: 0,
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(width: 6),
+                                Text(
+                                  'Monitoring active',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: isDarkMode ? Colors.grey.shade300 : Colors.grey.shade800,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                      ],
+                    ),
                   ),
-                  ],
-                ),
-                ),
-              ],
-            ),
+                ],
+              ),
             ),
           ],
         ),
@@ -570,6 +756,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   Widget _buildVoiceCommandsCard() {
     final voiceCommandService = VoiceCommandService.instance;
     final accidentProvider = Provider.of<AccidentProvider>(context, listen: false);
+    final theme = Theme.of(context);
+    final isDarkMode = theme.brightness == Brightness.dark;
     
     // Set application context for UI operations
     voiceCommandService.setApplicationContext(context);
@@ -579,439 +767,218 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     
     return Card(
       elevation: 4,
-      margin: const EdgeInsets.all(8),
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
+      shadowColor: Colors.black.withOpacity(0.1),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Container(
+        padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                Row(
-                  children: [
-                    Icon(Icons.mic, color: Colors.red),
-                    SizedBox(width: 8),
-            Text(
-                      'Emergency Voice Commands',
-                      style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ],
+                Icon(
+                  Icons.mic,
+                  color: theme.colorScheme.primary,
+                  size: 22,
                 ),
+                const SizedBox(width: 8),
+                Text(
+                  'Voice Commands',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: isDarkMode ? Colors.white : Colors.black87,
+                  ),
+                ),
+                const Spacer(),
                 Switch(
-                  value: voiceCommandService.isListening,
-                  activeColor: Colors.red,
-                  onChanged: (value) async {
-                    if (value) {
-                      final success = await voiceCommandService.startListening();
-                      if (!success) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text('Failed to start voice recognition'),
-                            backgroundColor: Colors.red,
-                          ),
-                        );
-                      }
-                    } else {
-                      await voiceCommandService.stopListening();
-                    }
-                    setState(() {});
+                  value: _voiceCommandsEnabled,
+                  activeColor: theme.colorScheme.primary,
+                  onChanged: (value) {
+                    _toggleVoiceCommands(value);
                   },
                 ),
               ],
             ),
-            const SizedBox(height: 16),
-            AnimatedContainer(
-              duration: Duration(milliseconds: 300),
-              height: 50,
-              width: double.infinity,
-                decoration: BoxDecoration(
-                color: voiceCommandService.isListening 
-                    ? Colors.red.withOpacity(0.2) 
-                    : Colors.grey.withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(8),
-                  ),
-              child: Center(
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(
-                      voiceCommandService.isListening 
-                          ? Icons.mic : Icons.mic_off,
-                      color: voiceCommandService.isListening 
-                          ? Colors.red : Colors.grey,
-                    ),
-                    SizedBox(width: 8),
-              Text(
-                      voiceCommandService.isListening 
-                          ? 'Listening for emergency words...' 
-                          : 'Voice recognition inactive',
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        color: voiceCommandService.isListening 
-                            ? Colors.red : Colors.grey,
-                      ),
-                    ),
-                  ],
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: isDarkMode 
+                    ? _voiceCommandsEnabled
+                        ? theme.colorScheme.primary.withOpacity(0.15)
+                        : Colors.grey.shade800 
+                    : _voiceCommandsEnabled
+                        ? theme.colorScheme.primary.withOpacity(0.05)
+                        : Colors.grey.shade50,
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(
+                  color: _voiceCommandsEnabled
+                      ? theme.colorScheme.primary.withOpacity(0.3)
+                      : isDarkMode ? Colors.grey.shade700 : Colors.grey.shade300,
                 ),
               ),
-            ),
-            const SizedBox(height: 16),
-            Text(
-              'Say any of these words for immediate emergency assistance:',
-              style: TextStyle(fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                _buildKeywordChip('Help', Colors.red),
-                _buildKeywordChip('Emergency', Colors.red),
-                _buildKeywordChip('Accident', Colors.red),
-                _buildKeywordChip('Crash', Colors.red),
-                _buildKeywordChip('Hurt', Colors.red),
-                _buildKeywordChip('Injured', Colors.red),
-                _buildKeywordChip('Danger', Colors.red),
-                _buildKeywordChip('Ambulance', Colors.red),
-              ],
-            ),
-            const SizedBox(height: 16),
-            ElevatedButton(
-              onPressed: () {
-                // Test emergency command
-                voiceCommandService.simulateWakeWord('emergency');
-              },
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.red,
-                foregroundColor: Colors.white,
-                minimumSize: Size(double.infinity, 48),
-              ),
-              child: Text('Test Emergency Alert'),
-            ),
-            // Debug button - only visible in debug mode
-            if (kDebugMode)
-              Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: OutlinedButton(
-                  onPressed: () async {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('Direct emergency test starting...'),
-                        backgroundColor: Colors.purple,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(
+                        _voiceCommandsEnabled ? Icons.mic : Icons.mic_off,
+                        color: _voiceCommandsEnabled 
+                            ? theme.colorScheme.primary 
+                            : isDarkMode ? Colors.grey.shade400 : Colors.grey.shade600,
+                        size: 20,
                       ),
-                    );
-                    try {
-                      await EmergencyService.instance.sendEmergencyAlert();
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('Direct test completed'),
-                          backgroundColor: Colors.green,
+                      const SizedBox(width: 8),
+                      Text(
+                        _voiceCommandsEnabled 
+                            ? 'Voice Detection Enabled' 
+                            : 'Voice Detection Disabled',
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 15,
+                          color: _voiceCommandsEnabled 
+                              ? theme.colorScheme.primary 
+                              : isDarkMode ? Colors.grey.shade300 : Colors.grey.shade700,
                         ),
-                      );
-                    } catch (e) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text('Error: $e'),
-                          backgroundColor: Colors.red,
-                        ),
-                      );
-                    }
-                  },
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: Colors.purple,
-                    side: BorderSide(color: Colors.purple),
-                  ),
-                  child: Text('Direct Emergency Test'),
-                ),
-              ),
-            // Direct SMS Test button
-            if (kDebugMode)
-              Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: OutlinedButton(
-                  onPressed: () async {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                        content: Text('Testing SMS directly...'),
-                        backgroundColor: Colors.blue,
                       ),
-                    );
-                    
-                    // Get current location
-                    Position? position;
-                    try {
-                      position = await Geolocator.getCurrentPosition(
-                        desiredAccuracy: LocationAccuracy.high,
-                        timeLimit: const Duration(seconds: 5),
-                      );
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text('Location: ${position.latitude}, ${position.longitude}'),
-                          backgroundColor: Colors.green,
-                        )
-                      );
-                    } catch (e) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text('Location error: $e'),
-                          backgroundColor: Colors.orange,
-                        )
-                      );
-                    }
-                    
-                    // Test phone number - replace with your test number
-                    String testNumber = '1234567890';
-                    
-                    // Create message
-                    String message = 'TEST EMERGENCY ALERT';
-                    if (position != null) {
-                      message += ' Location: ${position.latitude},${position.longitude}';
-                    }
-                    
-                    // Methods to try
-                    bool success = false;
-                    
-                    // Method 1: Direct tel URI
-                    try {
-                      final uri = Uri.parse('tel:$testNumber');
-                      success = await launchUrl(uri, mode: LaunchMode.externalApplication);
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text('Phone call test: $success'),
-                          backgroundColor: success ? Colors.green : Colors.red,
-                        )
-                      );
-                    } catch (e) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text('Phone call error: $e'),
-                          backgroundColor: Colors.red,
-                        )
-                      );
-                    }
-                    
-                    // Wait a moment before trying SMS
-                    await Future.delayed(Duration(seconds: 2));
-                    
-                    // Method 2: Simple sms URI
-                    try {
-                      // This is the most basic SMS URI that should open the SMS app
-                      final uri = Uri.parse('sms:');
-                      success = await launchUrl(uri, mode: LaunchMode.externalApplication);
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text('Basic SMS app open test: $success'),
-                          backgroundColor: success ? Colors.green : Colors.red,
-                        )
-                      );
-                    } catch (e) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text('Basic SMS app error: $e'),
-                          backgroundColor: Colors.red,
-                        )
-                      );
-                    }
-                    
-                    // Add a button to manually compose an emergency message
-                    showDialog(
-                      context: context,
-                      builder: (BuildContext context) {
-                        return AlertDialog(
-                          title: Text('Emergency SMS Results'),
-                          content: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text('The direct SMS methods might not be working due to platform restrictions.'),
-                              SizedBox(height: 16),
-                              Text('Would you like to manually compose an emergency message?'),
-                            ],
-                          ),
-                          actions: [
-                            TextButton(
-                              onPressed: () {
-                                Navigator.of(context).pop();
-                              },
-                              child: Text('Cancel'),
-                            ),
-                            TextButton(
-                              onPressed: () async {
-                                Navigator.of(context).pop();
-                                
-                                // Open default SMS app
-                                String locationText = position != null 
-                                    ? ' Location: https://www.google.com/maps/search/?api=1&query=${position.latitude},${position.longitude}'
-                                    : '';
-                                
-                                String messageBody = 'EMERGENCY ALERT: I need help!' + locationText;
-                                
-                                // Try to open SMS app with pre-filled message
-                                try {
-                                  final uri = Uri.parse('sms:?body=${Uri.encodeComponent(messageBody)}');
-                                  await launchUrl(uri, mode: LaunchMode.externalApplication);
-                                } catch (e) {
-                                  // Show error
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    SnackBar(
-                                      content: Text('Failed to open SMS app: $e'),
-                                      backgroundColor: Colors.red,
-                                    )
-                                  );
-                                }
-                              },
-                              child: Text('Compose SMS'),
-                            ),
-                          ],
-                        );
-                      },
-                    );
-                  },
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: Colors.blue,
-                    side: BorderSide(color: Colors.blue),
+                    ],
                   ),
-                  child: Text('SMS/Phone Direct Test'),
-                ),
+                  const SizedBox(height: 12),
+                  Text(
+                    _voiceCommandsEnabled
+                        ? 'The app is actively listening for emergency voice commands. Try saying "Help me" or "Emergency" if you need assistance.'
+                        : 'Enable voice detection to allow the app to respond to emergency voice commands.',
+                    style: TextStyle(
+                      fontSize: 13,
+                      height: 1.4,
+                      color: isDarkMode ? Colors.grey.shade400 : Colors.grey.shade600,
+                    ),
+                  ),
+                ],
               ),
+            ),
           ],
         ),
       ),
-    );
-  }
-  
-  Widget _buildKeywordChip(String label, Color color) {
-    return Chip(
-      label: Text(label),
-      backgroundColor: color.withOpacity(0.1),
-      side: BorderSide(color: color),
-      labelStyle: TextStyle(color: color, fontWeight: FontWeight.bold),
     );
   }
 
   Widget _buildQuickActionsSection(ThemeData theme) {
-    return Card(
-      margin: EdgeInsets.zero,
-      elevation: 0,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
+    final isDarkMode = theme.brightness == Brightness.dark;
+    
+    return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-            Row(
-              children: [
-                Icon(
-                  Icons.flash_on,
-                  color: theme.colorScheme.primary,
-                ),
-                const SizedBox(width: 8),
-                const Text(
-          'Quick Actions',
-                  style: TextStyle(
-                    fontSize: 16,
-            fontWeight: FontWeight.bold,
-          ),
-                ),
-              ],
-        ),
-        const SizedBox(height: 16),
-        Row(
-          children: [
-            Expanded(
-                  child: _buildQuickActionButton(
-                icon: Icons.history,
-                    label: 'History',
-                    color: const Color(0xFF4A6FFF),
-                    onTap: () {
-                      Navigator.pushNamed(context, '/accident_history');
-                    },
-                  ),
-                ),
-                const SizedBox(width: 12),
-            Expanded(
-                  child: _buildQuickActionButton(
-                    icon: Icons.contact_phone,
-                    label: 'Contacts',
-                    color: const Color(0xFF00C853),
-                    onTap: () {
-                      Navigator.pushNamed(context, '/emergency_contacts');
-                    },
-              ),
+        Padding(
+          padding: const EdgeInsets.only(left: 8, bottom: 12),
+          child: Text(
+            'Quick Actions',
+            style: TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.bold,
+              color: isDarkMode ? Colors.white : Colors.black87,
             ),
-          ],
+          ),
         ),
-        const SizedBox(height: 12),
         Row(
           children: [
             Expanded(
-                  child: _buildQuickActionButton(
-                icon: Icons.local_hospital,
-                    label: 'Hospitals',
-                    color: const Color(0xFFE53935),
+              child: _buildQuickActionItem(
+                Colors.green.shade600,
+                Icons.local_hospital,
+                'Nearby Hospitals',
                 onTap: () {
-                      Navigator.pushNamed(context, '/nearby_hospitals');
+                  Navigator.pushNamed(context, '/nearby_hospitals');
                 },
               ),
             ),
-                const SizedBox(width: 12),
+            const SizedBox(width: 16),
             Expanded(
-                  child: _buildQuickActionButton(
-                    icon: Icons.settings,
-                    label: 'Settings',
-                    color: const Color(0xFF757575),
-                    onTap: () {
-                      // TODO: Navigate to settings screen
-                    },
+              child: _buildQuickActionItem(
+                Colors.orange.shade700,
+                Icons.contact_phone,
+                'Emergency Contacts',
+                onTap: () {
+                  Navigator.pushNamed(context, '/emergency_contacts');
+                },
+              ),
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: _buildQuickActionItem(
+                Colors.blue.shade700,
+                Icons.history,
+                'Accident History',
+                onTap: () {
+                  Navigator.pushNamed(context, '/accident_history');
+                },
               ),
             ),
           ],
         ),
       ],
-        ),
-      ),
     );
   }
 
-  Widget _buildQuickActionButton({
-    required IconData icon,
-    required String label,
-    required Color color,
-    required VoidCallback onTap,
-  }) {
+  Widget _buildQuickActionItem(
+    Color color, 
+    IconData icon, 
+    String label, 
+    {required VoidCallback onTap}
+  ) {
     return InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(16),
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 16),
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(16),
+      child: Ink(
+        padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 8),
         decoration: BoxDecoration(
-          color: color.withOpacity(0.1),
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(
-            color: color.withOpacity(0.3),
-            width: 1,
+          gradient: LinearGradient(
+            colors: [
+              color,
+              Color.fromARGB(
+                color.alpha,
+                (color.red - 20).clamp(0, 255),
+                (color.green - 20).clamp(0, 255),
+                (color.blue - 20).clamp(0, 255),
+              ),
+            ],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
           ),
+          borderRadius: BorderRadius.circular(16),
+          boxShadow: [
+            BoxShadow(
+              color: color.withOpacity(0.3),
+              blurRadius: 8,
+              offset: const Offset(0, 3),
+            ),
+          ],
         ),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-            Icon(
-                  icon,
-              color: color,
-              size: 28,
-                ),
-            const SizedBox(height: 8),
-              Text(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.2),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                icon,
+                color: Colors.white,
+                size: 24,
+              ),
+            ),
+            const SizedBox(height: 10),
+            Text(
               label,
-              style: TextStyle(
+              style: const TextStyle(
                 fontWeight: FontWeight.w600,
-                color: color,
+                color: Colors.white,
                 fontSize: 14,
               ),
             ),
@@ -1024,7 +991,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   Widget _buildManualAlertButton(ThemeData theme, String userId) {
     return Card(
       margin: EdgeInsets.zero,
-      elevation: 0,
+      elevation: 4,
+      shadowColor: Colors.black.withOpacity(0.2),
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(20),
       ),
@@ -1037,58 +1005,80 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
               colors: [
                 const Color(0xFFFF5252),
                 const Color(0xFFE53935),
+                const Color(0xFFD32F2F),
               ],
               begin: Alignment.topLeft,
               end: Alignment.bottomRight,
             ),
             borderRadius: BorderRadius.circular(20),
+            boxShadow: [
+              BoxShadow(
+                color: const Color(0xFFE53935).withOpacity(0.3),
+                blurRadius: 8,
+                spreadRadius: 0,
+                offset: const Offset(0, 3),
+              ),
+            ],
           ),
-        child: Padding(
-            padding: const EdgeInsets.all(16.0),
-          child: Row(
-            children: [
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
+          child: Padding(
+            padding: const EdgeInsets.all(20.0),
+            child: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
                     color: Colors.white.withOpacity(0.2),
                     shape: BoxShape.circle,
+                    border: Border.all(
+                      color: Colors.white.withOpacity(0.5),
+                      width: 2,
+                    ),
                   ),
                   child: const Icon(
                     Icons.emergency,
                     color: Colors.white,
-                    size: 36,
+                    size: 40,
+                  ),
                 ),
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+                const SizedBox(width: 20),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: const [
-                    Text(
+                      Text(
                         'Emergency Alert',
                         style: TextStyle(
-                          fontSize: 18,
-                        fontWeight: FontWeight.bold,
+                          fontSize: 22,
+                          fontWeight: FontWeight.bold,
                           color: Colors.white,
+                        ),
                       ),
-                    ),
-                      SizedBox(height: 4),
-                    Text(
+                      SizedBox(height: 6),
+                      Text(
                         'Tap to send alerts to your emergency contacts',
                         style: TextStyle(
                           fontSize: 14,
                           color: Colors.white,
+                          height: 1.3,
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
-              ),
-                const Icon(
-                Icons.arrow_forward_ios,
-                  color: Colors.white,
-                  size: 16,
-              ),
-            ],
+                Container(
+                  width: 36,
+                  height: 36,
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.2),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(
+                    Icons.arrow_forward,
+                    color: Colors.white,
+                    size: 20,
+                  ),
+                ),
+              ],
             ),
           ),
         ),
@@ -1642,6 +1632,815 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
           backgroundColor: Colors.red,
         ),
       );
+    }
+  }
+
+  Widget _buildSettingsDrawer(BuildContext context) {
+    final authProvider = Provider.of<AuthProvider>(context);
+    return Drawer(
+      child: SafeArea(
+        child: ListView(
+          padding: EdgeInsets.zero,
+          children: [
+            DrawerHeader(
+              decoration: BoxDecoration(
+                color: Theme.of(context).primaryColor,
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  CircleAvatar(
+                    radius: 30,
+                    backgroundColor: Colors.white,
+                    child: Icon(
+                      Icons.person,
+                      size: 35,
+                      color: Theme.of(context).primaryColor,
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                  Text(
+                    authProvider.firebaseUser?.displayName ?? 'User',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  Text(
+                    authProvider.firebaseUser?.email ?? '',
+                    style: const TextStyle(
+                      color: Colors.white70,
+                      fontSize: 14,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.history),
+              title: const Text('Accident History'),
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.pushNamed(context, '/accident_history');
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.contacts),
+              title: const Text('Emergency Contacts'),
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.pushNamed(context, '/emergency_contacts');
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.local_hospital),
+              title: const Text('Nearby Hospitals'),
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.pushNamed(context, '/nearby_hospitals');
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.warning),
+              title: const Text('Accident Zones Admin'),
+              subtitle: const Text('Manage high-risk areas'),
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.pushNamed(context, '/accident_zones_admin');
+              },
+            ),
+            const Divider(),
+            ListTile(
+              leading: const Icon(Icons.settings),
+              title: const Text('Settings'),
+              onTap: () {
+                Navigator.pop(context);
+                _showSettingsDialog();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.logout, color: Colors.red),
+              title: const Text('Logout', style: TextStyle(color: Colors.red)),
+              onTap: () {
+                Navigator.pop(context);
+                authProvider.signOut().then((_) {
+                  Navigator.pushReplacementNamed(context, '/login');
+                });
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showSettingsDialog() {
+    Navigator.pushNamed(context, '/settings');
+  }
+
+  Future<void> _checkLocationAndLoadZones() async {
+    final accidentProvider = Provider.of<AccidentProvider>(context, listen: false);
+    
+    // If location is null, try to get it directly
+    if (accidentProvider.currentPosition == null) {
+      try {
+        debugPrint('Current position is null, trying to get location directly');
+        final position = await Geolocator.getCurrentPosition(
+          desiredAccuracy: LocationAccuracy.high,
+          timeLimit: const Duration(seconds: 5),
+        );
+        
+        // Manually update the position in the provider
+        accidentProvider.updatePosition(position);
+        debugPrint('Successfully got position: ${position.latitude}, ${position.longitude}');
+      } catch (e) {
+        debugPrint('Error getting location directly: $e');
+      }
+    }
+    
+    // Load zones regardless of whether we got a location
+    _loadNearbyAccidentZones();
+  }
+
+  Future<void> _loadNearbyAccidentZones() async {
+    debugPrint('Loading nearby accident zones');
+    if (_isLoadingZones) {
+      debugPrint('Already loading zones, skipping');
+      return;
+    }
+    
+    setState(() {
+      _isLoadingZones = true;
+    });
+    
+    try {
+      // Get current position
+      final accidentProvider = Provider.of<AccidentProvider>(context, listen: false);
+      debugPrint('Current position: ${accidentProvider.currentPosition}');
+      
+      // Use current location or a default location if null
+      final LatLng currentLocation;
+      
+      if (accidentProvider.currentPosition != null) {
+        currentLocation = LatLng(
+          accidentProvider.currentPosition!.latitude,
+          accidentProvider.currentPosition!.longitude,
+        );
+        debugPrint('Using actual device location: ${currentLocation.latitude}, ${currentLocation.longitude}');
+      } else {
+        // Default to a location in the center of a major city (this is New York City)
+        currentLocation = LatLng(40.7128, -74.0060);
+        debugPrint('Using default location (NYC): ${currentLocation.latitude}, ${currentLocation.longitude}');
+      }
+      
+      debugPrint('Fetching accident zones near: ${currentLocation.latitude}, ${currentLocation.longitude}');
+      
+      // Try to get zones from Firestore
+      final zones = await _zoneService.getAccidentZones(
+        center: currentLocation,
+        radiusKm: 10.0,
+      );
+      
+      debugPrint('Fetched ${zones.length} zones from service');
+      
+      // If no zones found, generate some demo ones
+      if (zones.isEmpty) {
+        debugPrint('No zones found, generating default zones');
+        _generateDefaultZones(currentLocation);
+      } else {
+        setState(() {
+          _nearbyAccidentZones = zones;
+          _isLoadingZones = false;
+          debugPrint('Set ${_nearbyAccidentZones.length} zones in state');
+        });
+      }
+    } catch (e) {
+      debugPrint('Error loading accident zones: $e');
+      setState(() {
+        _isLoadingZones = false;
+      });
+    }
+  }
+  
+  void _generateDefaultZones(LatLng center) {
+    debugPrint('Generating default zones near: ${center.latitude}, ${center.longitude}');
+    final random = Random();
+    final List<AccidentZone> defaultZones = [];
+    
+    // Generate 3 random zones with different risk levels
+    defaultZones.add(AccidentZone(
+      id: 'home-high',
+      center: LatLng(
+        center.latitude + (random.nextDouble() - 0.5) * 0.01,
+        center.longitude + (random.nextDouble() - 0.5) * 0.01,
+      ),
+      radius: 0.5 + random.nextDouble() * 0.5,
+      accidentCount: 15 + random.nextInt(10),
+      riskLevel: 3, // High risk
+      description: 'High-risk intersection with frequent collisions during peak hours.',
+      lastUpdated: DateTime.now().subtract(Duration(days: random.nextInt(30))),
+    ));
+    
+    defaultZones.add(AccidentZone(
+      id: 'home-medium',
+      center: LatLng(
+        center.latitude + (random.nextDouble() - 0.5) * 0.015,
+        center.longitude + (random.nextDouble() - 0.5) * 0.015,
+      ),
+      radius: 0.3 + random.nextDouble() * 0.4,
+      accidentCount: 8 + random.nextInt(7),
+      riskLevel: 2, // Medium risk
+      description: 'Area with frequent rain-related accidents due to poor drainage.',
+      lastUpdated: DateTime.now().subtract(Duration(days: random.nextInt(60))),
+    ));
+    
+    // Add low risk zone
+    defaultZones.add(AccidentZone(
+      id: 'home-low',
+      center: LatLng(
+        center.latitude + (random.nextDouble() - 0.5) * 0.02,
+        center.longitude + (random.nextDouble() - 0.5) * 0.02,
+      ),
+      radius: 0.2 + random.nextDouble() * 0.3,
+      accidentCount: 3 + random.nextInt(5),
+      riskLevel: 1, // Low risk
+      description: 'Moderate risk zone with occasional minor accidents.',
+      lastUpdated: DateTime.now().subtract(Duration(days: random.nextInt(90))),
+    ));
+    
+    debugPrint('Generated ${defaultZones.length} default zones');
+    
+    setState(() {
+      _nearbyAccidentZones = defaultZones;
+      _isLoadingZones = false;
+      debugPrint('Set ${_nearbyAccidentZones.length} default zones in state');
+    });
+  }
+  
+  void _showAccidentZoneOnMap(AccidentZone zone) {
+    Navigator.push(
+      context, 
+      MaterialPageRoute(
+        builder: (context) => NearbyHospitalsScreen(
+          location: zone.center,
+        ),
+      )
+    );
+  }
+  
+  Widget _buildAccidentZoneCard() {
+    debugPrint('Building accident zone card, zones count: ${_nearbyAccidentZones.length}');
+    final theme = Theme.of(context);
+    final isDarkMode = theme.brightness == Brightness.dark;
+    
+    if (_nearbyAccidentZones.isEmpty) {
+      debugPrint('No accident zones to display');
+      return const SizedBox.shrink();
+    }
+    
+    // Get current position from accident provider
+    final accidentProvider = Provider.of<AccidentProvider>(context, listen: false);
+    LatLng displayLocation;
+    
+    if (accidentProvider.currentPosition != null) {
+      displayLocation = LatLng(
+        accidentProvider.currentPosition!.latitude,
+        accidentProvider.currentPosition!.longitude,
+      );
+      debugPrint('Using actual position for map: ${displayLocation.latitude}, ${displayLocation.longitude}');
+    } else {
+      // Use the center of the first accident zone if we have no GPS location
+      displayLocation = _nearbyAccidentZones.first.center;
+      debugPrint('Using accident zone position for map: ${displayLocation.latitude}, ${displayLocation.longitude}');
+    }
+      
+    debugPrint('Display location for accident zone card: $displayLocation');
+      
+    // Sort zones by risk level (highest first)
+    final sortedZones = List<AccidentZone>.from(_nearbyAccidentZones)
+      ..sort((a, b) => b.riskLevel.compareTo(a.riskLevel));
+      
+    debugPrint('Sorted zones, highest risk zone: ${sortedZones.isNotEmpty ? sortedZones[0].riskLevel : "none"}');
+    
+    return Card(
+      margin: EdgeInsets.zero,
+      elevation: 4,
+      shadowColor: Colors.black.withOpacity(0.1),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Header with title and refresh button
+          Container(
+            padding: const EdgeInsets.fromLTRB(16, 16, 8, 8),
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: [
+                  Colors.red.shade700,
+                  Colors.red.shade600,
+                ],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              ),
+              borderRadius: const BorderRadius.only(
+                topLeft: Radius.circular(20),
+                topRight: Radius.circular(20),
+              ),
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.warning_amber_rounded,
+                  color: Colors.white,
+                  size: 24,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  'Accident Risk Zones Nearby',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
+                  ),
+                ),
+                const Spacer(),
+                IconButton(
+                  icon: const Icon(Icons.refresh, size: 20, color: Colors.white),
+                  tooltip: 'Refresh location',
+                  onPressed: () {
+                    _checkLocationAndLoadZones();
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Refreshing location and zones...'),
+                        duration: Duration(seconds: 1),
+                      ),
+                    );
+                  },
+                ),
+              ],
+            ),
+          ),
+          
+          // Show location status (real or default)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+            child: accidentProvider.currentPosition == null
+              ? Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: Colors.orange.withOpacity(0.3)),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.location_off, size: 14, color: Colors.orange),
+                      const SizedBox(width: 6),
+                      Text(
+                        'Using default location',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.orange,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                )
+              : Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: Colors.green.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(color: Colors.green.withOpacity(0.3)),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.location_on, size: 14, color: Colors.green),
+                      const SizedBox(width: 6),
+                      Text(
+                        'Using your current location',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.green,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+          ),
+          
+          // Mini map showing accident zones
+          Container(
+            height: 220,
+            width: double.infinity,
+            margin: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(16),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.1),
+                  blurRadius: 10,
+                  spreadRadius: 0,
+                  offset: const Offset(0, 2),
+                ),
+              ],
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(16),
+              child: Stack(
+                children: [
+                  FlutterMap(
+                    options: MapOptions(
+                      initialCenter: displayLocation,
+                      initialZoom: 13.5,
+                      maxZoom: 16.0,
+                      minZoom: 12.0,
+                      interactiveFlags: InteractiveFlag.none, // Disable interactions
+                    ),
+                    children: [
+                      TileLayer(
+                        urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                        userAgentPackageName: 'com.example.accident_report_system',
+                        maxZoom: 19,
+                      ),
+                      
+                      // Add circular markers for accident zones
+                      if (_nearbyAccidentZones.isNotEmpty)
+                        CircleLayer(
+                          circles: _nearbyAccidentZones.map((zone) {
+                            final color = zone.getZoneColor(opacity: 0.4);
+                            final borderColor = zone.getZoneColor(opacity: 0.8);
+                            return CircleMarker(
+                              point: zone.center,
+                              radius: zone.radius * 1000, // Convert km to meters
+                              useRadiusInMeter: true,
+                              color: color,
+                              borderColor: borderColor,
+                              borderStrokeWidth: 2.0,
+                            );
+                          }).toList(),
+                        ),
+                      
+                      // Current location marker
+                      MarkerLayer(
+                        markers: [
+                          Marker(
+                            width: 50,
+                            height: 50,
+                            point: displayLocation,
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Container(
+                                  width: 16,
+                                  height: 16,
+                                  decoration: BoxDecoration(
+                                    color: Colors.blue,
+                                    shape: BoxShape.circle,
+                                    border: Border.all(
+                                      color: Colors.white,
+                                      width: 2,
+                                    ),
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color: Colors.black.withOpacity(0.2),
+                                        blurRadius: 4,
+                                        spreadRadius: 0,
+                                        offset: const Offset(0, 2),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                Container(
+                                  width: 8,
+                                  height: 8,
+                                  margin: const EdgeInsets.only(top: 3),
+                                  decoration: BoxDecoration(
+                                    color: Colors.blue.withOpacity(0.3),
+                                    shape: BoxShape.circle,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                  
+                  // Add a subtle gradient overlay at the bottom
+                  Positioned(
+                    bottom: 0,
+                    left: 0,
+                    right: 0,
+                    height: 36, // Reduced height
+                    child: Container(
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                          colors: [
+                            Colors.transparent,
+                            Colors.black.withOpacity(0.2),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                  
+                  // Map attribution
+                  Positioned(
+                    bottom: 3, // Reduced position
+                    right: 3, // Reduced position
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1), // Reduced vertical padding
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(0.7),
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                      child: Text(
+                        '© OpenStreetMap',
+                        style: TextStyle(
+                          fontSize: 9, // Reduced font size
+                          color: Colors.black54,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          
+          // Legend for the map
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 4, 16, 4), // Reduced vertical padding
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                _buildLegendItem(Colors.red.shade700, 'High Risk'),
+                const SizedBox(width: 12), // Reduced width
+                _buildLegendItem(Colors.orange, 'Medium Risk'),
+                const SizedBox(width: 12), // Reduced width
+                _buildLegendItem(Colors.yellow.shade700, 'Low Risk'),
+              ],
+            ),
+          ),
+          
+          // Show the highest risk zone description
+          if (sortedZones.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+              child: _buildAccidentZoneItem(sortedZones[0]),
+            ),
+            
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 10, 16, 16),
+            child: Column(
+              children: [
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: () {
+                      Navigator.pushNamed(context, '/nearby_hospitals');
+                    },
+                    icon: const Icon(Icons.map, size: 16), // Reduced icon size
+                    label: const Text('View Full Map'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.red.shade700,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 10), // Reduced vertical padding
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      elevation: 2,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: _isLoadingKaggleData ? null : _loadIndianAccidentData,
+                    icon: _isLoadingKaggleData 
+                        ? SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.red.shade700,
+                            ),
+                          )
+                        : const Icon(Icons.refresh, size: 16),
+                    label: Text(_isLoadingKaggleData ? 'Loading Data...' : 'Refresh Accident Data'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.red.shade700,
+                      side: BorderSide(color: Colors.red.shade700),
+                      padding: const EdgeInsets.symmetric(vertical: 10),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+  
+  Widget _buildLegendItem(Color color, String label) {
+    return Row(
+      children: [
+        Container(
+          width: 12, // Reduced size
+          height: 12, // Reduced size
+          decoration: BoxDecoration(
+            color: color.withOpacity(0.7),
+            shape: BoxShape.circle,
+            border: Border.all(
+              color: color,
+              width: 1,
+            ),
+            boxShadow: [
+              BoxShadow(
+                color: color.withOpacity(0.3),
+                blurRadius: 2,
+                spreadRadius: 0,
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(width: 4), // Reduced spacing
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: 11, // Reduced font size
+            color: Colors.grey.shade800,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+      ],
+    );
+  }
+  
+  Widget _buildAccidentZoneItem(AccidentZone zone) {
+    Color zoneColor = zone.getZoneColor();
+    
+    return GestureDetector(
+      onTap: () => _showAccidentZoneOnMap(zone),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 8), // Reduced margin
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8), // Reduced padding
+        decoration: BoxDecoration(
+          color: zoneColor.withOpacity(0.07),
+          borderRadius: BorderRadius.circular(12), // Reduced radius
+          border: Border.all(
+            color: zoneColor.withOpacity(0.5),
+            width: 1,
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4), // Reduced padding
+                  decoration: BoxDecoration(
+                    color: zoneColor,
+                    borderRadius: BorderRadius.circular(10), // Reduced radius
+                    boxShadow: [
+                      BoxShadow(
+                        color: zoneColor.withOpacity(0.3),
+                        blurRadius: 3, // Reduced blur
+                        offset: const Offset(0, 1), // Reduced offset
+                      ),
+                    ],
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(
+                        zone.riskLevel == 3 
+                          ? Icons.warning_amber_rounded 
+                          : (zone.riskLevel == 2 
+                            ? Icons.info_outline 
+                            : Icons.remove_circle_outline),
+                        color: Colors.white,
+                        size: 14, // Reduced size
+                      ),
+                      const SizedBox(width: 3), // Reduced spacing
+                      Text(
+                        '${zone.accidentCount} Accidents',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 11, // Reduced font size
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const Spacer(),
+                Text(
+                  'Tap for details',
+                  style: TextStyle(
+                    fontSize: 11, // Reduced font size
+                    color: Colors.grey.shade600,
+                    fontStyle: FontStyle.italic,
+                  ),
+                ),
+                const SizedBox(width: 3), // Reduced spacing
+                Icon(
+                  Icons.arrow_forward_ios,
+                  size: 10, // Reduced size
+                  color: Colors.grey.shade600,
+                ),
+              ],
+            ),
+            const SizedBox(height: 6), // Reduced spacing
+            Text(
+              zone.description,
+              style: TextStyle(
+                fontSize: 12, // Reduced font size
+                color: Colors.grey.shade800,
+                height: 1.3, // Reduced line height
+              ),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _loadIndianAccidentData() async {
+    if (_isLoadingKaggleData) return;
+    
+    setState(() {
+      _isLoadingKaggleData = true;
+    });
+    
+    try {
+      final accidentProvider = Provider.of<AccidentProvider>(context, listen: false);
+      
+      // Get current location or use a default location for India
+      final LatLng currentLocation;
+      if (accidentProvider.currentPosition != null) {
+        currentLocation = LatLng(
+          accidentProvider.currentPosition!.latitude,
+          accidentProvider.currentPosition!.longitude,
+        );
+      } else {
+        // Default to a location in India
+        currentLocation = const LatLng(20.5937, 78.9629);
+      }
+      
+      // Initialize Kaggle service with default credentials
+      await _kaggleService.initialize();
+      
+      // Generate sample accident zones for India
+      final zones = _kaggleService.generateSampleIndianAccidentZones(currentLocation);
+      
+      // Update the accident zones in the provider
+      accidentProvider.setAccidentZones(zones);
+      
+      // Show success message
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Loaded ${zones.length} accident hotspots in India'),
+            backgroundColor: Colors.green,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('Error loading Kaggle accident data: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Error loading accident data. Try again later.'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoadingKaggleData = false;
+        });
+      }
     }
   }
 } 

@@ -89,6 +89,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final isDarkMode = theme.brightness == Brightness.dark;
     
     return Scaffold(
       appBar: AppBar(
@@ -142,12 +143,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   const SizedBox(height: 20),
                   
                   // Profile avatar
-                  _buildProfileAvatar(user, theme),
+                  _buildProfileAvatar(user, theme, isDarkMode),
                   
                   const SizedBox(height: 30),
                   
                   // User information form
-                  _buildUserInfoForm(user, theme),
+                  _buildUserInfoForm(user, theme, isDarkMode),
                   
                   const SizedBox(height: 30),
                   
@@ -170,7 +171,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   
                   // Emergency contacts section
                   const SizedBox(height: 40),
-                  _buildEmergencyContactsSection(user, theme),
+                  _buildEmergencyContactsSection(user, theme, isDarkMode),
                 ],
               ),
             ),
@@ -180,7 +181,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     );
   }
 
-  Widget _buildProfileAvatar(UserModel user, ThemeData theme) {
+  Widget _buildProfileAvatar(UserModel user, ThemeData theme, bool isDarkMode) {
     return Stack(
       alignment: Alignment.bottomRight,
       children: [
@@ -200,7 +201,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
             backgroundColor: theme.colorScheme.primary,
             child: CircleAvatar(
               radius: 57,
-              backgroundColor: Colors.white,
+              backgroundColor: isDarkMode ? theme.cardColor : Colors.white,
               child: Text(
                 user.name.isNotEmpty ? user.name[0].toUpperCase() : '?',
                 style: TextStyle(
@@ -231,7 +232,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     );
   }
 
-  Widget _buildUserInfoForm(UserModel user, ThemeData theme) {
+  Widget _buildUserInfoForm(UserModel user, ThemeData theme, bool isDarkMode) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -240,7 +241,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
           'Full Name',
           style: TextStyle(
             fontSize: 14,
-            color: Colors.grey.shade600,
+            color: isDarkMode ? Colors.grey.shade300 : Colors.grey.shade600,
           ),
         ),
         const SizedBox(height: 8),
@@ -255,15 +256,25 @@ class _ProfileScreenState extends State<ProfileScreen> {
           },
           decoration: InputDecoration(
             filled: true,
-            fillColor: _isEditing ? Colors.transparent : Colors.grey.shade100,
+            fillColor: _isEditing 
+                ? Colors.transparent 
+                : isDarkMode 
+                    ? theme.cardColor
+                    : Colors.grey.shade100,
             border: OutlineInputBorder(
               borderRadius: BorderRadius.circular(12),
               borderSide: BorderSide(
                 color: _isEditing ? theme.colorScheme.primary : Colors.transparent,
               ),
             ),
-            prefixIcon: const Icon(Icons.person),
+            prefixIcon: Icon(
+              Icons.person,
+              color: isDarkMode ? theme.colorScheme.primary : null,
+            ),
             enabled: _isEditing,
+          ),
+          style: TextStyle(
+            color: isDarkMode ? Colors.white : Colors.black87,
           ),
         ),
         
@@ -274,7 +285,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
           'Email',
           style: TextStyle(
             fontSize: 14,
-            color: Colors.grey.shade600,
+            color: isDarkMode ? Colors.grey.shade300 : Colors.grey.shade600,
           ),
         ),
         const SizedBox(height: 8),
@@ -294,17 +305,27 @@ class _ProfileScreenState extends State<ProfileScreen> {
           },
           decoration: InputDecoration(
             filled: true,
-            fillColor: _isEditing ? Colors.transparent : Colors.grey.shade100,
+            fillColor: _isEditing 
+                ? Colors.transparent 
+                : isDarkMode 
+                    ? theme.cardColor
+                    : Colors.grey.shade100,
             border: OutlineInputBorder(
               borderRadius: BorderRadius.circular(12),
               borderSide: BorderSide(
                 color: _isEditing ? theme.colorScheme.primary : Colors.transparent,
               ),
             ),
-            prefixIcon: const Icon(Icons.email),
+            prefixIcon: Icon(
+              Icons.email,
+              color: isDarkMode ? theme.colorScheme.primary : null,
+            ),
             enabled: _isEditing,
           ),
           keyboardType: TextInputType.emailAddress,
+          style: TextStyle(
+            color: isDarkMode ? Colors.white : Colors.black87,
+          ),
         ),
         
         const SizedBox(height: 20),
@@ -314,7 +335,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
           'Phone Number',
           style: TextStyle(
             fontSize: 14,
-            color: Colors.grey.shade600,
+            color: isDarkMode ? Colors.grey.shade300 : Colors.grey.shade600,
           ),
         ),
         const SizedBox(height: 8),
@@ -333,23 +354,33 @@ class _ProfileScreenState extends State<ProfileScreen> {
           },
           decoration: InputDecoration(
             filled: true,
-            fillColor: _isEditing ? Colors.transparent : Colors.grey.shade100,
+            fillColor: _isEditing 
+                ? Colors.transparent 
+                : isDarkMode 
+                    ? theme.cardColor
+                    : Colors.grey.shade100,
             border: OutlineInputBorder(
               borderRadius: BorderRadius.circular(12),
               borderSide: BorderSide(
                 color: _isEditing ? theme.colorScheme.primary : Colors.transparent,
               ),
             ),
-            prefixIcon: const Icon(Icons.phone),
+            prefixIcon: Icon(
+              Icons.phone,
+              color: isDarkMode ? theme.colorScheme.primary : null,
+            ),
             enabled: _isEditing,
           ),
           keyboardType: TextInputType.phone,
+          style: TextStyle(
+            color: isDarkMode ? Colors.white : Colors.black87,
+          ),
         ),
       ],
     );
   }
 
-  Widget _buildEmergencyContactsSection(UserModel user, ThemeData theme) {
+  Widget _buildEmergencyContactsSection(UserModel user, ThemeData theme, bool isDarkMode) {
     return Card(
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(16),
@@ -367,6 +398,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   'Emergency Contacts',
                   style: theme.textTheme.titleMedium?.copyWith(
                     fontWeight: FontWeight.bold,
+                    color: isDarkMode ? Colors.white : null,
                   ),
                 ),
                 TextButton.icon(
@@ -383,7 +415,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
               'People who will be notified in case of an accident',
               style: TextStyle(
                 fontSize: 13,
-                color: Colors.grey.shade600,
+                color: isDarkMode ? Colors.grey.shade300 : Colors.grey.shade600,
               ),
             ),
             const SizedBox(height: 16),
@@ -396,14 +428,14 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     children: [
                       Icon(
                         Icons.contact_phone,
-                        color: Colors.grey.shade400,
+                        color: isDarkMode ? Colors.grey.shade600 : Colors.grey.shade400,
                         size: 48,
                       ),
                       const SizedBox(height: 16),
                       Text(
                         'No emergency contacts added yet',
                         style: TextStyle(
-                          color: Colors.grey.shade600,
+                          color: isDarkMode ? Colors.grey.shade300 : Colors.grey.shade600,
                         ),
                       ),
                       const SizedBox(height: 8),
@@ -438,7 +470,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
                         color: theme.colorScheme.primary,
                       ),
                     ),
-                    title: Text(contact),
+                    title: Text(
+                      contact,
+                      style: TextStyle(
+                        color: isDarkMode ? Colors.white : Colors.black87,
+                      ),
+                    ),
                     contentPadding: EdgeInsets.zero,
                   );
                 },
@@ -451,7 +488,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   child: Text(
                     'and ${user.emergencyContacts.length - 3} more...',
                     style: TextStyle(
-                      color: Colors.grey.shade600,
+                      color: isDarkMode ? Colors.grey.shade400 : Colors.grey.shade600,
                       fontStyle: FontStyle.italic,
                     ),
                   ),

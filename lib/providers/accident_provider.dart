@@ -1278,4 +1278,47 @@ class AccidentProvider extends ChangeNotifier {
       throw e; // Re-throw to allow proper error handling upstream
     }
   }
+
+  /// Handle an emergency command from voice
+  Future<void> handleEmergencyCommand() async {
+    debugPrint('Handling emergency command from voice command service');
+    
+    try {
+      // Check if we have a user ID
+      String? userId = _auth.currentUser?.uid;
+      
+      if (userId == null || userId.isEmpty) {
+        // Use anonymous ID if not signed in
+        userId = 'anonymous';
+        debugPrint('Using anonymous user ID for emergency command');
+      }
+      
+      // Get the current position
+      Position? position;
+      try {
+        position = await Geolocator.getCurrentPosition(
+          desiredAccuracy: LocationAccuracy.high,
+          timeLimit: const Duration(seconds: 5),
+        );
+        debugPrint('Got position for emergency command: ${position.latitude}, ${position.longitude}');
+      } catch (e) {
+        debugPrint('Error getting position for emergency command: $e');
+        // Continue without position
+      }
+      
+      // Report a manual accident with low priority
+      await reportManualAccident(
+        userId: userId,
+        forceValue: 10.0, // Low force for voice commands
+        position: position,
+        testMode: userId == 'anonymous',
+      );
+      
+      debugPrint('Emergency command processed successfully');
+      return;
+    } catch (e) {
+      debugPrint('Error processing emergency command: $e');
+      rethrow;
+    }
+  }
 } 

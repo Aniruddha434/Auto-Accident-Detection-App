@@ -9,6 +9,7 @@
     <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE"/>
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <uses-permission android:name="android.permission.VIBRATE"/>
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
@@ -49,6 +50,12 @@
         <service
             android:name=".AccidentDetectionService"
             android:foregroundServiceType="location"
+            android:exported="false" />
+            
+        <!-- Register the VoiceRecognitionService -->
+        <service
+            android:name=".VoiceRecognitionService"
+            android:foregroundServiceType="microphone"
             android:exported="false" />
             
         <!-- Register BroadcastReceiver for auto-start -->

@@ -7,6 +7,8 @@ import 'package:accident_report_system/providers/accident_provider.dart';
 import 'package:accident_report_system/services/voice_command_service.dart';
 import 'package:accident_report_system/services/background_service.dart';
 import 'package:accident_report_system/services/sms_service.dart';
+import 'package:accident_report_system/main.dart';
+import 'dart:async';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -16,7 +18,7 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
-  bool _darkModeEnabled = false;
+  String _themeMode = 'system';
   bool _voiceCommandsEnabled = true;
   bool _backgroundMonitoringEnabled = false;
   bool _crashDetectionEnabled = true;
@@ -24,6 +26,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _isSaving = false;
   bool _isTesting = false;
   String _appVersion = '1.0.0';
+  Map<String, bool> _settings = {};
 
   final VoiceCommandService _voiceCommandService = VoiceCommandService();
 
@@ -32,6 +35,23 @@ class _SettingsScreenState extends State<SettingsScreen> {
     super.initState();
     _loadSettings();
     _getAppVersion();
+    
+    // Initialize with existing settings
+    VoiceCommandService.instance.initialize().then((_) {
+      VoiceCommandService.instance.loadSettings().then((_) {
+        setState(() {
+          // Update UI with the actual state from the service
+          _settings['enableVoiceCommands'] = VoiceCommandService.instance.isListening;
+          // We'll add the background voice setting in the next refresh
+        });
+      });
+    });
+    
+    BackgroundService.initialize().then((_) {
+      setState(() {
+        _settings['enableBackgroundMonitoring'] = BackgroundService.instance.isMonitoring;
+      });
+    });
   }
 
   Future<void> _getAppVersion() async {
@@ -55,12 +75,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
       
       // Load all settings
       setState(() {
-        _darkModeEnabled = prefs.getBool('dark_mode_enabled') ?? false;
+        _themeMode = prefs.getString('theme_mode') ?? 'system';
         _backgroundMonitoringEnabled = prefs.getBool('background_monitoring_enabled') ?? false;
         _crashDetectionEnabled = prefs.getBool('crash_detection_enabled') ?? true;
         
         // For voice commands, we'll use the actual state from the service
         _voiceCommandsEnabled = _voiceCommandService.isListening;
+        
+        // Update settings map
+        _settings['enableVoiceCommands'] = _voiceCommandsEnabled;
+        _settings['enableBackgroundMonitoring'] = _backgroundMonitoringEnabled;
+        _settings['enableBackgroundVoice'] = prefs.getBool('background_voice_enabled') ?? false;
       });
       
     } catch (e) {
@@ -81,9 +106,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final prefs = await SharedPreferences.getInstance();
       
       // Save all settings
-      await prefs.setBool('dark_mode_enabled', _darkModeEnabled);
+      await prefs.setString('theme_mode', _themeMode);
       await prefs.setBool('background_monitoring_enabled', _backgroundMonitoringEnabled);
       await prefs.setBool('crash_detection_enabled', _crashDetectionEnabled);
+      
+      // Apply theme change immediately
+      MyApp.updateTheme(context, _themeMode);
       
       // Update the voice command service
       if (_voiceCommandService.isListening != _voiceCommandsEnabled) {
@@ -236,20 +264,69 @@ class _SettingsScreenState extends State<SettingsScreen> {
             backgroundColor: Colors.red,
           ),
         );
+        setState(() {
+          _isTesting = false;
+        });
         return;
       }
-      
-      // Get the accident provider
-      final accidentProvider = Provider.of<AccidentProvider>(context, listen: false);
-      
-      // Get test number - normally we'd retrieve from Firestore
-      const String testNumber = '1234567890'; // REPLACE WITH YOUR TEST NUMBER for testing
       
       // Get the SMS service
       final smsService = SmsService();
       
+      // First check permission explicitly
+      final bool permissionGranted = await smsService.checkSmsPermission();
+      if (!permissionGranted) {
+        scaffoldMessenger.showSnackBar(
+          const SnackBar(
+            content: Text('SMS permission not granted. Requesting permission...'),
+            backgroundColor: Colors.orange,
+            duration: Duration(seconds: 2),
+          ),
+        );
+        
+        final bool permissionRequested = await smsService.requestSmsPermission();
+        if (!permissionRequested) {
+          scaffoldMessenger.showSnackBar(
+            const SnackBar(
+              content: Text('SMS permission denied. Cannot send test SMS.'),
+              backgroundColor: Colors.red,
+              duration: Duration(seconds: 3),
+            ),
+          );
+          setState(() {
+            _isTesting = false;
+          });
+          return;
+        }
+      }
+      
+      // Request phone number through dialog
+      String? testNumber = await _showPhoneNumberDialog();
+      
+      // If user cancelled the dialog
+      if (testNumber == null || testNumber.isEmpty) {
+        scaffoldMessenger.showSnackBar(
+          const SnackBar(
+            content: Text('Test cancelled - no phone number provided'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+        setState(() {
+          _isTesting = false;
+        });
+        return;
+      }
+      
       // Create a test message
       final String message = 'TEST ALERT from AccidentPre app. This is a test message sent at ${DateTime.now().toString()}';
+      
+      // Show in-progress indication
+      scaffoldMessenger.showSnackBar(
+        SnackBar(
+          content: Text('Sending test SMS to $testNumber...'),
+          duration: const Duration(seconds: 3),
+        ),
+      );
       
       // Attempt to send SMS directly
       try {
@@ -260,6 +337,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ? 'SMS test initiated successfully to $testNumber' 
               : 'SMS test failed, but no exception was thrown'),
             backgroundColor: sentOk ? Colors.green : Colors.orange,
+            duration: const Duration(seconds: 5),
           ),
         );
       } catch (e) {
@@ -267,6 +345,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           SnackBar(
             content: Text('SMS test failed with error: $e'),
             backgroundColor: Colors.red,
+            duration: const Duration(seconds: 5),
           ),
         );
       }
@@ -275,6 +354,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         SnackBar(
           content: Text('Error in SMS test: $e'),
           backgroundColor: Colors.red,
+          duration: const Duration(seconds: 5),
         ),
       );
     } finally {
@@ -282,6 +362,50 @@ class _SettingsScreenState extends State<SettingsScreen> {
         _isTesting = false;
       });
     }
+  }
+  
+  // Show a dialog to get the test phone number
+  Future<String?> _showPhoneNumberDialog() async {
+    final TextEditingController phoneController = TextEditingController();
+    
+    return showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text('Enter Test Phone Number'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: phoneController,
+                decoration: const InputDecoration(
+                  labelText: 'Phone Number',
+                  hintText: 'Enter a valid phone number to test SMS',
+                ),
+                keyboardType: TextInputType.phone,
+                autofocus: true,
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                'Make sure this is a valid number that can receive SMS.',
+                style: TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.of(context).pop(phoneController.text.trim()),
+              child: const Text('Test SMS'),
+            ),
+          ],
+        );
+      },
+    );
   }
   
   // Test direct navigation to hospitals screen
@@ -354,16 +478,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   _buildSectionHeader('General Settings', Icons.settings, theme),
                   _buildSettingsCard(
                     children: [
-                      _buildSwitchTile(
-                        title: 'Dark Mode',
-                        subtitle: 'Enable dark theme for the app',
-                        value: _darkModeEnabled,
-                        onChanged: (value) {
-                          setState(() {
-                            _darkModeEnabled = value;
-                          });
-                        },
-                      ),
+                      _buildThemeDropdownTile(),
                       const Divider(),
                       _buildSwitchTile(
                         title: 'Voice Commands',
@@ -473,43 +588,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   
                   const SizedBox(height: 24),
                   _buildSectionHeader('Testing', Icons.bug_report, theme),
-                  _buildSettingsCard(
-                    children: [
-                      ListTile(
-                        title: const Text('Test Accident Alert'),
-                        subtitle: const Text('Simulates a manual accident report'),
-                        trailing: _isTesting
-                            ? const CircularProgressIndicator()
-                            : const Icon(Icons.send),
-                        onTap: _isTesting ? null : _testAccidentAlert,
-                      ),
-                      ListTile(
-                        title: const Text('Test Sensor Detection'),
-                        subtitle: const Text('Simulates accelerometer readings for detection'),
-                        trailing: _isTesting
-                            ? const CircularProgressIndicator()
-                            : const Icon(Icons.sensors),
-                        onTap: _isTesting ? null : _testSensorDetection,
-                      ),
-                      const Divider(),
-                      ListTile(
-                        title: const Text('Direct SMS Test'),
-                        subtitle: const Text('Directly tests SMS functionality'),
-                        trailing: _isTesting
-                            ? const CircularProgressIndicator()
-                            : const Icon(Icons.message),
-                        onTap: _isTesting ? null : _testDirectSms,
-                      ),
-                      ListTile(
-                        title: const Text('Direct Navigation Test'),
-                        subtitle: const Text('Directly navigate to hospitals screen'),
-                        trailing: _isTesting
-                            ? const CircularProgressIndicator()
-                            : const Icon(Icons.local_hospital),
-                        onTap: _isTesting ? null : _testDirectNavigation,
-                      ),
-                    ],
-                  ),
+                  _buildTestingSection(),
                   
                   const SizedBox(height: 30),
                   SizedBox(
@@ -571,6 +650,49 @@ class _SettingsScreenState extends State<SettingsScreen> {
         child: Column(
           children: children,
         ),
+      ),
+    );
+  }
+
+  Widget _buildThemeDropdownTile() {
+    return ListTile(
+      title: const Text('Theme Mode'),
+      subtitle: const Text('Choose app appearance'),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16),
+      trailing: DropdownButton<String>(
+        value: _themeMode,
+        onChanged: (String? value) {
+          if (value != null) {
+            setState(() {
+              _themeMode = value;
+            });
+            
+            // Preview theme change immediately
+            MyApp.updateTheme(context, value);
+            
+            // Show notice that save is needed to persist
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Theme updated. Save settings to make this permanent.'),
+                duration: Duration(seconds: 2),
+              ),
+            );
+          }
+        },
+        items: const [
+          DropdownMenuItem(
+            value: 'system',
+            child: Text('System Default'),
+          ),
+          DropdownMenuItem(
+            value: 'light',
+            child: Text('Light Mode'),
+          ),
+          DropdownMenuItem(
+            value: 'dark',
+            child: Text('Dark Mode'),
+          ),
+        ],
       ),
     );
   }
@@ -654,5 +776,200 @@ class _SettingsScreenState extends State<SettingsScreen> {
         Navigator.pushNamedAndRemoveUntil(context, '/login', (route) => false);
       }
     }
+  }
+
+  /// Build testing section
+  Widget _buildTestingSection() {
+    return _buildSettingsCard(
+      children: [
+        _buildNavigationTile(
+          title: 'Test Accident Alert',
+          subtitle: 'Simulate a manual accident report',
+          icon: Icons.warning_amber_rounded,
+          onTap: () {
+            setState(() {
+              _isTesting = true;
+            });
+            
+            // Show countdown dialog
+            _showCountdownDialog(context, 10, () {
+              // After countdown, trigger the accident detection
+              _simulateAccident();
+            });
+          },
+        ),
+        _buildNavigationTile(
+          title: 'Test Sensor Detection',
+          subtitle: 'Simulate accelerometer readings for accident detection',
+          icon: Icons.sensors,
+          onTap: () {
+            final provider = Provider.of<AccidentProvider>(context, listen: false);
+            provider.simulateAccelerometerEvent();
+            _showFeedback('Simulated sensor readings', success: true);
+          },
+        ),
+        _buildNavigationTile(
+          title: 'Direct SMS Test',
+          subtitle: 'Test SMS functionality',
+          icon: Icons.sms,
+          onTap: () {
+            final provider = Provider.of<AccidentProvider>(context, listen: false);
+            provider.testSmsPermissionAndSending(context);
+          },
+        ),
+        _buildNavigationTile(
+          title: 'Direct Navigation Test',
+          subtitle: 'Test navigation to nearby hospitals',
+          icon: Icons.local_hospital,
+          onTap: () {
+            Navigator.pushNamed(context, '/nearby_hospitals');
+          },
+        ),
+        _buildNavigationTile(
+          title: 'Test Voice Command',
+          subtitle: 'Test voice command detection',
+          icon: Icons.record_voice_over,
+          onTap: () {
+            VoiceCommandService.processCommand('help', context);
+            _showFeedback('Voice command test triggered', success: true);
+          },
+        ),
+        _buildNavigationTile(
+          title: 'Test Background Voice',
+          subtitle: 'Test background voice detection',
+          icon: Icons.mic_external_on,
+          onTap: () async {
+            final result = await VoiceCommandService.instance.startBackgroundVoiceService();
+            if (result) {
+              _showFeedback('Background voice service started', success: true);
+              setState(() {
+                _settings['enableBackgroundVoice'] = true;
+              });
+            } else {
+              _showFeedback('Failed to start background voice service', success: false);
+            }
+          },
+        ),
+      ],
+    );
+  }
+
+  /// Build a navigation tile for settings
+  Widget _buildNavigationTile({
+    required String title,
+    required String subtitle,
+    required IconData icon,
+    required Function() onTap,
+  }) {
+    return ListTile(
+      title: Text(title),
+      subtitle: Text(subtitle),
+      leading: Icon(icon),
+      trailing: _isTesting ? const CircularProgressIndicator() : const Icon(Icons.chevron_right),
+      onTap: _isTesting ? null : onTap,
+    );
+  }
+
+  /// Show a feedback message to the user
+  void _showFeedback(String message, {bool success = true}) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: success ? Colors.green : Colors.red,
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
+  /// Simulate an accident for testing
+  Future<void> _simulateAccident() async {
+    final provider = Provider.of<AccidentProvider>(context, listen: false);
+    
+    try {
+      await provider.reportManualAccident(
+        userId: 'anonymous',
+        forceValue: 12.0,
+        testMode: true,
+      );
+      
+      _showFeedback('Accident alert simulated successfully', success: true);
+    } catch (e) {
+      debugPrint('Error simulating accident: $e');
+      _showFeedback('Error simulating accident: $e', success: false);
+    } finally {
+      setState(() {
+        _isTesting = false;
+      });
+    }
+  }
+
+  /// Show a countdown dialog
+  void _showCountdownDialog(BuildContext context, int seconds, Function() onComplete) {
+    int remainingSeconds = seconds;
+    bool completed = false;
+    
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        // Set up a timer to update the countdown
+        Timer.periodic(const Duration(seconds: 1), (timer) {
+          remainingSeconds--;
+          
+          if (remainingSeconds <= 0) {
+            timer.cancel();
+            Navigator.of(dialogContext).pop();
+            
+            if (!completed) {
+              completed = true;
+              onComplete();
+            }
+          } else {
+            // Update the state
+            if (dialogContext.mounted) {
+              (dialogContext as Element).markNeedsBuild();
+            }
+          }
+        });
+        
+        return AlertDialog(
+          title: const Text('Test Accident Alert'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'Simulating an accident in:',
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 20),
+              Text(
+                '$remainingSeconds',
+                style: const TextStyle(
+                  fontSize: 48,
+                  fontWeight: FontWeight.bold,
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 20),
+              const Text(
+                'This will test the emergency alert system',
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.of(dialogContext).pop();
+                setState(() {
+                  _isTesting = false;
+                });
+              },
+              child: const Text('CANCEL'),
+            ),
+          ],
+        );
+      },
+    );
   }
 } 
