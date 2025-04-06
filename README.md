@@ -160,5 +160,4 @@ The app requires the following permissions:
 - Voice interface for hands-free operation
 
 ## Demo
-
-View a demonstration of the app in action: [App Demo Video](https://drive.google.com/file/d/1ICGSGmNlDQ2NZ3KhuuY0yNbuYQoaKl-J/view?usp=sharing)
+: [App info Video](https://drive.google.com/file/d/1ICGSGmNlDQ2NZ3KhuuY0yNbuYQoaKl-J/view?usp=sharing)
