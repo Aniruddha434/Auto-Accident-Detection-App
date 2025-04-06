@@ -158,3 +158,7 @@ The app requires the following permissions:
 - Integration with telematics data for more accurate accident detection
 - Multi-language support for international users
 - Voice interface for hands-free operation
+
+## Demo
+
+View a demonstration of the app in action: [App Demo Video](https://drive.google.com/file/d/1ICGSGmNlDQ2NZ3KhuuY0yNbuYQoaKl-J/view?usp=sharing)
