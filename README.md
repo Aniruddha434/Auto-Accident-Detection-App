@@ -2,6 +2,10 @@
 
 A Flutter mobile app that automatically detects accidents and sends emergency alerts with the user's live location.
 
+![WhatsApp Image 2025-07-04 at 23 19 07_f33dda49](https://github.com/user-attachments/assets/7866066d-2a1d-44ec-9dcd-ef2dcb6db81e)
+
+![WhatsApp Image 2025-07-04 at 23 19 07_35248450](https://github.com/user-attachments/assets/827c764b-4888-4bf9-982b-cb3146d2cf9d)
+
 ## Features
 
 - **Automatic Accident Detection**: Uses device accelerometer sensors to detect sudden impacts. If the impact force exceeds 4g, it triggers an emergency alert.
@@ -159,5 +163,4 @@ The app requires the following permissions:
 - Multi-language support for international users
 - Voice interface for hands-free operation
 
-## Demo
-: [App info Video](https://drive.google.com/file/d/1ICGSGmNlDQ2NZ3KhuuY0yNbuYQoaKl-J/view?usp=sharing)
+
