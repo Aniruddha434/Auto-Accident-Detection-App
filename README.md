@@ -72,26 +72,7 @@ The AI system includes robust fallback mechanisms to ensure guidance is availabl
 5. Create Firestore Database with the following collections:
    - `users` - To store user data and emergency contacts
    - `accidents` - To store accident reports
-6. Set up Firestore security rules:
 
-   ```
-   rules_version = '2';
-   service cloud.firestore {
-     match /databases/{database}/documents {
-       // Allow authenticated users to read and write their own user data
-       match /users/{userId} {
-         allow read, write: if request.auth != null && request.auth.uid == userId;
-       }
-
-       // Allow authenticated users to read and write their own accident reports
-       match /accidents/{accidentId} {
-         allow read, write: if request.auth != null &&
-                             resource.data.userId == request.auth.uid;
-         allow create: if request.auth != null &&
-                        request.resource.data.userId == request.auth.uid;
-       }
-     }
-   }
    ```
 
 ### Google Maps Setup
